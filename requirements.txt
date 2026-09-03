@@ -1,0 +1,14 @@
+# Python dependencies. The conversion tools themselves are separate system
+# installs -- see README.md.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# Optional. File type detection works without it: detect.py ships a
+# pure-Python magic-signature sniffer that covers every format this app
+# routes. python-magic is consulted only as a fallback, and only when a
+# startup probe proves it can be imported safely -- on Windows without a
+# libmagic DLL, `import magic` aborts the interpreter rather than raising,
+# which would take the server down. Install it only if you also have a
+# working libmagic.
+# python-magic>=0.4.27
