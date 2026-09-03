@@ -167,6 +167,15 @@ Every handler in `handlers/` follows the same contract:
   and be non-empty. Several of these tools will happily report success and
   write nothing.
 
+Children are also tied to the server's lifetime. On a clean shutdown the
+server kills whatever is still running. For the unclean case, every child is
+placed in a Windows job object created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+(`process_group.py`): the job's only handle belongs to the server process, so
+when that process dies — including under `taskkill /F`, where no application
+code runs at all — the kernel closes the handle and kills everything inside.
+On POSIX children get their own process group, which covers clean shutdown but
+cannot survive a `kill -9` of the parent.
+
 Two tool-specific details:
 
 - **LibreOffice** cannot be told what to name its output; it writes
@@ -199,6 +208,7 @@ converter-app/
   registry.py                   conversion table, chaining, route lookup
   detect.py                     content-based file type detection
   binaries.py                   locating the five external tools
+  process_group.py              tying child processes to the server's lifetime
   jobs.py                       job store and temp-file lifecycle
   handlers/
     base.py                     shared subprocess rules
@@ -212,17 +222,26 @@ converter-app/
   run.ps1 / run.sh
 ```
 
-`binaries.py` is the one module not in the original spec's layout. Tool
-resolution needed a single home once both `/health` and the handlers had to
-agree on whether a tool exists.
+`binaries.py` and `process_group.py` are the two modules not in the original
+spec's layout. Tool resolution needed a single home once both `/health` and the
+handlers had to agree on whether a tool exists; process supervision needed one
+once the answer turned out to be platform-specific.
 
 ## What has been verified
 
-The registry declares 192 routes. 186 of them were run end to end through the
-live HTTP API — upload, detect, convert, poll, download — with the downloaded
-bytes checked against the expected magic number for each target format, four
-jobs at a time. All 186 pass. The remaining 6 are the HEIC sources described
-under Limitations, which have no testable fixture.
+All 192 declared routes were run end to end through the live HTTP API — upload,
+detect, convert, poll, download — with the downloaded bytes checked against the
+expected magic number for each target format, four jobs at a time. 192/192
+pass, with nothing skipped.
+
+The HEIC sources needed a fixture none of the five tools can produce (they all
+read HEIC; none writes it). One was generated out-of-band with `pillow-heif`,
+which bundles a HEIF encoder:
+
+```bash
+pip install pillow pillow-heif     # test-time only, not an app dependency
+python -c "from PIL import Image; import pillow_heif; pillow_heif.register_heif_opener(); Image.new('RGB',(160,120),'blue').save('sample.heic', format='HEIF')"
+```
 
 Also checked:
 
@@ -238,6 +257,11 @@ Also checked:
   with "Conversion timed out", and no orphaned process is left behind.
 - Server shutdown kills in-flight conversions; the job thread unwinds as a
   failure rather than hanging.
+- **`taskkill /F` on the server mid-transcode leaves no orphan.** Verified by
+  starting a 25-second transcode, force-killing the server, and confirming the
+  ffmpeg process count went back to zero.
+- FFmpeg jobs report real progress — a 25-second transcode stepped
+  5 → 17 → 30 → 42 → 60 → 71 → 83 → 100%.
 - Restarting sweeps stale temp files (197 leftover entries removed on the way
   up, `.gitkeep` preserved) and conversions work immediately afterwards.
 - Filenames with Windows-illegal characters, reserved device names (`con.png`),
@@ -245,26 +269,23 @@ Also checked:
 - Five files dropped at once convert independently, and one failing does not
   block the other four.
 
-Note that killing the server with `taskkill /F` (or `kill -9`) *can* orphan a
-running conversion: nothing in the process can run once it is force-killed.
-Ctrl+C and SIGTERM are handled and do clean up.
-
 ## Limitations
 
 - **PDF is write-only.** Converting *to* PDF works from images, office
   documents and ebooks. Converting *from* PDF is not offered: rasterising a PDF
   needs Ghostscript, which is a separate install this app does not assume.
-- **HEIC is input-only, and is the one route not exercised end to end.**
-  ImageMagick reports HEIC as read-only (`r--`) via its libheif delegate, so
-  HEIC is offered as a source and never as a target. It is also the only part
-  of the matrix without a test: none of the five installed tools can *write* a
-  HEIC, so there was no way to produce a genuine sample to convert. AVIF, which
-  goes through the same libheif delegate and is read/write, is fully tested.
+- **HEIC is input-only.** ImageMagick reports HEIC as read-only (`r--`) via its
+  libheif delegate, so HEIC is offered as a source and never as a target. AVIF
+  goes through the same delegate and is read/write, so it works both ways.
 - **Pandoc cannot write PDF directly** without a LaTeX engine. Markdown to PDF
   is routed through DOCX and LibreOffice instead, and if you ask Pandoc for a
   PDF in a way that reaches it directly, the error explains that rather than
   repeating Pandoc's `pdflatex not found`.
-- **Progress is coarse.** Jobs report stage transitions, not percentages within
-  a step. FFmpeg can report real progress; the other four mostly cannot, so
-  rather than fake a smooth bar the UI shows an indeterminate one.
+- **Only FFmpeg reports real progress.** Video and audio jobs show a true
+  percentage, read from `ffmpeg -progress` against the duration `ffprobe`
+  reports. ImageMagick, Pandoc, LibreOffice and Calibre expose nothing
+  comparable, so their jobs show stage transitions and a moving bar rather than
+  a number that would be invented. The same fallback applies to a video whose
+  duration cannot be read — a stream-recorded WEBM, for instance, often carries
+  no duration in its header, and there is then nothing honest to divide by.
 - Chains are capped at two hops by design.

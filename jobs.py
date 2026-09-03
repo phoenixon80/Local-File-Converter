@@ -43,6 +43,7 @@ class Job:
     detected_type: str = ""
     status: str = QUEUED
     progress: int = 0
+    measured: bool = False   # True once a tool reported real progress
     stage: str = ""          # e.g. "png -> jpg (step 1 of 2)"
     error: str = ""          # short, human-readable
     details: str = ""        # full stderr, for the collapsible debug section
@@ -63,6 +64,9 @@ class Job:
             "filename": self.filename,
             "status": self.status,
             "progress": self.progress,
+            # Lets the UI show a real bar instead of a barber's pole, but only
+            # for tools that actually report progress.
+            "measured": self.measured,
             "stage": self.stage,
             "detected_type": self.detected_type,
             "source_ext": self.source_ext,

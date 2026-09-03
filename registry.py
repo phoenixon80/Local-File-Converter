@@ -14,8 +14,6 @@ from handlers import (calibre_handler, ffmpeg_handler, imagemagick_handler,
 
 Handler = Callable[..., object]
 
-MAX_CHAIN_HOPS = 2
-
 
 @dataclass(frozen=True)
 class Route:

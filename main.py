@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 import binaries
 import jobs
+import process_group
 import registry
 from detect import detect
 from handlers import base as handler_base
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
     if missing:
         print(f"[startup] tools not found: {', '.join(missing)} "
               f"(conversions needing them will be rejected with an explanation)")
+    print(f"[startup] {process_group.status()}")
 
     async def sweeper() -> None:
         while True:
@@ -52,9 +54,9 @@ async def lifespan(app: FastAPI):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        # Take any running conversions down with the server. A force-kill of
-        # the process cannot be caught, but Ctrl+C and SIGTERM come through
-        # here, and those are how this app actually gets stopped.
+        # Take any running conversions down with the server. This covers the
+        # clean paths (Ctrl+C, SIGTERM); a force-kill runs no code at all, and
+        # is handled instead by the OS-level guard in process_group.
         stopped = handler_base.terminate_all()
         if stopped:
             print(f"[shutdown] stopped {stopped} running conversion(s)")
@@ -81,6 +83,7 @@ def run_conversion(job_id: str) -> None:
         stem = Path(job.filename).stem
         current = Path(job.input_path)
 
+        span = 90 / len(steps)
         for index, route in enumerate(steps):
             last = index == len(steps) - 1
             # Only the final artefact gets the user-facing name; intermediates
@@ -90,9 +93,15 @@ def run_conversion(job_id: str) -> None:
             label = f"{route.source} -> {route.target}"
             if len(steps) > 1:
                 label += f" (step {index + 1} of {len(steps)})"
-            store.update(job_id, stage=label,
-                         progress=5 + int(90 * index / len(steps)))
-            route.handler(current, output_path)
+            base = 5 + span * index
+            store.update(job_id, stage=label, progress=int(base))
+
+            def on_progress(fraction: float, _base=base) -> None:
+                """Scale a step's own 0..1 progress into the job's overall bar."""
+                store.update(job_id, measured=True,
+                             progress=int(_base + span * max(0.0, min(1.0, fraction))))
+
+            route.handler(current, output_path, on_progress=on_progress)
             current = output_path
 
         store.update(job_id, status=DONE, progress=100, stage="complete",
